@@ -19,8 +19,7 @@ $ErrorActionPreference = "Stop"
 
 # Debug?
 Write-Debug "Debug mode enabled."
-Write-Debug (Get-Location).Path
-if ($PSDebugContext -and $PSDebugContext.DebugMode -eq 1) { Write-Output (Get-ChildItem) }
+Write-Debug $PWD
 
 # internal constants
 [string]$login_url = "/api/auth/v1/api_keys/login"
@@ -38,31 +37,31 @@ if ($PSDebugContext -and $PSDebugContext.DebugMode -eq 1) { Write-Output (Get-Ch
 # Input Validation
 # Input file must be specified
 if (-not $input_file) {
-    Write-Error "Error: Please provide the path to the APK/IPA file as a command-line argument."
+    Write-Error "Please provide the path to the APK/IPA file as a command-line argument."
     exit 1
 }
 
 # Input file must exist
 if (-not (Test-Path -Path $input_file)) {
-    Write-Error "Error: File $input_file does not exist."
+    Write-Error "File $input_file does not exist."
     exit 1
 }
 
 # Credentials must be specified
 if (-not $client_id -or -not $secret) {
-    Write-Error "Error: Please provide client id and secret via environment variables or as command-line parameters. Refer to the documentation for details."
+    Write-Error "Please provide client id and secret via environment variables or as command-line parameters. Refer to the documentation for details."
     exit 1
 }
 
 # Output format must be one of [json, sarif]
 if ($report_format -ne "json" -and $report_format -ne "sarif") {
-    Write-Error "Error: Output format must be one of [json, sarif]."
+    Write-Error "Output format must be one of [json, sarif]."
     exit 1
 }
 
 # Minimum wait time is 30 seconds; we don't want to DDOS our own servers
 if ($wait_interval -lt 30) {
-    Write-Output "Warning: Wait interval is less than 30 seconds. Setting it to 30 seconds."
+    Write-Information "Wait interval is less than 30 seconds. Setting it to 30 seconds."
     $wait_interval = 30
 }
 
@@ -73,6 +72,7 @@ Write-Output "Using zConsole at $server_url"
 # Execute the curl command with the server URL
 $response = Invoke-RestMethod -Uri "$server_url$login_url" -Method Post -ContentType "application/json" -Body (@{ clientId = $client_id; secret = $secret } | ConvertTo-Json)
 $secret = $null
+Write-Debug "Login Response: $response"
 
 # Check if the curl command was successful
 if ($response) {
@@ -80,24 +80,21 @@ if ($response) {
 
     # Check if access token is found
     if ($access_token) {
-        if ($PSDebugContext -and $PSDebugContext.DebugMode -eq 1) {
-            Write-Output "Extracted access token: $access_token"
-        } else {
-            Write-Output "Extracted access token: $($access_token.Substring(0, 10))..."
-        }
+        Write-Output "Successfully obtained access token."
 
         # convert to secure string as required by Invoke-RestMethod
         $access_token = ConvertTo-SecureString $access_token -AsPlainText -Force
     } else {
-        Write-Error "Error: access token not found in response."
+        Write-Error "Access token not found in response."
         exit 3
     }
 } else {
-    Write-Error "Error: unable to obtain access token."
+    Write-Error "Unable to obtain access token."
     exit 3
 }
 
 $response = Invoke-RestMethod -Uri "$server_url$upload_url" -Method Post -Authentication Bearer -Token $access_token -ContentType "multipart/form-data" -Form @{ buildFile = Get-Item $input_file; buildNumber = $build_number; environment = $environment; branchName = $branch_name; ciToolId = $ciToolId; ciToolName = $ciToolName }
+Write-Debug "Upload Response: $response"
 
 # Check for successful response
 if ($response) {
@@ -112,7 +109,7 @@ if ($response) {
 
     # Check if variables were extracted successfully
     if (-not $buildId -or -not $buildUploadedAt -or -not $appBuildVersion -or -not $bundleIdentifier -or -not $appVersion) {
-        Write-Error "Error: Failed to extract application attributes from response."
+        Write-Error "Failed to extract application attributes from response."
     } else {
         Write-Output "Successfully uploaded binary: $input_file"
         Write-Output "buildId: $buildId"
@@ -123,7 +120,7 @@ if ($response) {
         Write-Output "appVersion: $appVersion"
     }
 } else {
-    Write-Error "Error: Failed to upload APK file."
+    Write-Error "Failed to upload APK file."
     exit 1
 }
 
@@ -134,31 +131,33 @@ if ($null -eq $teamId) {
 
     # Fetch the list of teams using the access token
     $teams_response = Invoke-RestMethod -Uri "$server_url$teams_url" -Method Get -Authentication Bearer -Token $access_token
+    Write-Debug "Team List Response: $teams_response"
 
     if ($teams_response) {
         $teamId = $teams_response.content | Where-Object { $_.name -eq $team_name } | Select-Object -ExpandProperty id
 
         if (-not $teamId) {
-            Write-Error "Error: Failed to extract teamId for the team named '$team_name'. Please ensure you have granted the Authorization token the 'view teams' permission under the 'Common' category, within the console's Authorization settings."
+            Write-Error "Failed to extract teamId for the team named '$team_name'. Please ensure you have granted the Authorization token the 'view teams' permission under the 'Common' category, within the console's Authorization settings."
             exit 1
         } else {
             Write-Output "Successfully extracted teamId: '$teamId' for Team named: '$team_name'."
 
             # Perform the second API call to complete the upload
             $second_response = Invoke-RestMethod -Uri "$server_url$complete_upload_url/$zdevAppId/upload" -Method Put -Authentication Bearer -Token $access_token -ContentType "application/json" -Body (@{ teamId = $teamId; buildNumber = $appBuildVersion } | ConvertTo-Json)
+            Write-Debug "Complete Upload Response: $second_response"
 
             if (-not $second_response) {
-                Write-Error "Error: Failed to perform assign the application to the specified team. Although the scan will complete, the results will not be visible in the console UI. Use -Debug to troubleshoot."
+                Write-Error "Failed to perform assign the application to the specified team. Although the scan will complete, the results will not be visible in the console UI."
             }
         }
     } else {
-        Write-Error "Error: Failed to extract the list of teams from your console. Although the scan will complete, the results will not be visible in the console UI. Please ensure you have granted the Authorization token the 'view teams' permission under the 'Common' category, within the console's Authorization settings."
+        Write-Error "Failed to extract the list of teams from your console. Although the scan will complete, the results will not be visible in the console UI. Please ensure you have granted the Authorization token the 'view teams' permission under the 'Common' category, within the console's Authorization settings."
     }
 }
 
 # If no need to wait for report, we're done
 if (-not $wait_for_report) {
-    Write-Output "ZSCAN_WAIT_FOR_REPORT is not set. We're done!"
+    Write-Output "'wait_for_report' is false. We're done!"
     exit 0
 }
 
@@ -181,6 +180,7 @@ while ($true) {
             Write-Output "Scan is not completed. Status: $ScanStatus."
         }
     } else {
+        Write-Debug "Status Response: $response"
         Write-Error "Error Checking the Status of Scan."
     }
     # Sleep for the interval
@@ -203,4 +203,5 @@ Invoke-RestMethod -Uri "$server_url$download_assessment_url/$AssessmentID/$repor
 Write-Output "Response saved to: $full_report_file_name"
 $env:ZSCAN_REPORT_FILE = $full_report_file_name
 
-Write-Debug (Get-ChildItem)
+# Exit with success
+exit 0
