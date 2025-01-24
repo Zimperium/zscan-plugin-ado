@@ -1,32 +1,26 @@
-#!/usr/bin/env pwsh
+param(
+    [string]$server_url = "https://zc202.zimperium.com",
+    [string]$client_id = $env:ZSCAN_CLIENT_ID,
+    [string]$secret = $env:ZSCAN_CLIENT_SECRET,
+    [string]$team_name = "Default",
+    [Parameter(Mandatory)][string]$input_file,
+    [string]$report_format = "sarif",
+    [string]$report_location = '.',
+    [string]$report_file_name,
+    [bool]$wait_for_report = $true,
+    [int]$wait_interval = 30,
+    [string]$branch_name,
+    [string]$build_number,
+    [string]$environment
+)
 
 # Exit on error
 $ErrorActionPreference = "Stop"
 
 # Debug?
-if ($env:ZSCAN_DEBUG) {
-    $DebugPreference = "Continue"
-    Write-Output "Debug mode enabled."
-    Write-Output Get-Location
-    Write-Output Get-ChildItem -Force
-}
-
-# Define mandatory parameters
-[string]$server_url = ($env:ZSCAN_SERVER_URL) ? $env:ZSCAN_SERVER_URL : "https://zc202.zimperium.com"
-[string]$client_id = $env:ZSCAN_CLIENT_ID
-[string]$secret = $env:ZSCAN_CLIENT_SECRET
-[string]$team_name = ($env:ZSCAN_TEAM_NAME) ? $env:ZSCAN_TEAM_NAME : "Default"
-[string]$input_file = ($env:ZSCAN_INPUT_FILE) ? $env:ZSCAN_INPUT_FILE : $args[0]
-[string]$report_format = ($env:ZSCAN_REPORT_FORMAT) ? $env:ZSCAN_REPORT_FORMAT : "sarif"
-
-# Optional parameters
-[string]$report_location = ($env:ZSCAN_REPORT_LOCATION) ? $env:ZSCAN_REPORT_LOCATION : "."
-[string]$report_file_name = $env:ZSCAN_REPORT_FILE_NAME
-[bool]$wait_for_report = ($env:ZSCAN_WAIT_FOR_REPORT) ? $env:ZSCAN_WAIT_FOR_REPORT : $true
-[int]$wait_interval = ($env:ZSCAN_POLLING_INTERVAL) ? $env:ZSCAN_POLLING_INTERVAL : 30
-[string]$branch_name = $env:ZSCAN_BRANCH
-[string]$build_number = $env:ZSCAN_BUILD_NUMBER
-[string]$environment = $env:ZSCAN_ENVIRONMENT
+Write-Debug "Debug mode enabled."
+Write-Debug (Get-Location).Path
+if ($PSDebugContext -and $PSDebugContext.DebugMode -eq 1) { Write-Output (Get-ChildItem) }
 
 # internal constants
 [string]$login_url = "/api/auth/v1/api_keys/login"
@@ -44,7 +38,7 @@ if ($env:ZSCAN_DEBUG) {
 # Input Validation
 # Input file must be specified
 if (-not $input_file) {
-    Write-Error "Error: Please provide the path to the APK/IPA file in the plugin settings or as a command-line argument."
+    Write-Error "Error: Please provide the path to the APK/IPA file as a command-line argument."
     exit 1
 }
 
@@ -56,7 +50,7 @@ if (-not (Test-Path -Path $input_file)) {
 
 # Credentials must be specified
 if (-not $client_id -or -not $secret) {
-    Write-Error "Error: Please provide client id and secret via environment variables. Refer to the documentation for details."
+    Write-Error "Error: Please provide client id and secret via environment variables or as command-line parameters. Refer to the documentation for details."
     exit 1
 }
 
@@ -68,13 +62,12 @@ if ($report_format -ne "json" -and $report_format -ne "sarif") {
 
 # Minimum wait time is 30 seconds; we don't want to DDOS our own servers
 if ($wait_interval -lt 30) {
+    Write-Output "Warning: Wait interval is less than 30 seconds. Setting it to 30 seconds."
     $wait_interval = 30
 }
 
 # Remove trailing spaces and slashes
-$server_url = $server_url.TrimEnd(' ')
-$server_url = $server_url.TrimEnd('/')
-
+$server_url = $server_url.TrimEnd(' ', '/')
 Write-Output "Using zConsole at $server_url"
 
 # Execute the curl command with the server URL
@@ -87,7 +80,7 @@ if ($response) {
 
     # Check if access token is found
     if ($access_token) {
-        if ($env:ZSCAN_DEBUG) {
+        if ($PSDebugContext -and $PSDebugContext.DebugMode -eq 1) {
             Write-Output "Extracted access token: $access_token"
         } else {
             Write-Output "Extracted access token: $($access_token.Substring(0, 10))..."
@@ -125,7 +118,7 @@ if ($response) {
         Write-Output "buildId: $buildId"
         Write-Output "buildUploadedAt: $buildUploadedAt"
         Write-Output "buildNumber (appBuildVersion): $appBuildVersion"
-        if ($env:ZSCAN_DEBUG) { Write-Output "uploadedBy: $uploadedBy" }
+        Write-Debug "uploadedBy: $uploadedBy" # This prints Client_ID, which we don't want to expose unless debugging
         Write-Output "bundleIdentifier: $bundleIdentifier"
         Write-Output "appVersion: $appVersion"
     }
@@ -155,7 +148,7 @@ if ($null -eq $teamId) {
             $second_response = Invoke-RestMethod -Uri "$server_url$complete_upload_url/$zdevAppId/upload" -Method Put -Authentication Bearer -Token $access_token -ContentType "application/json" -Body (@{ teamId = $teamId; buildNumber = $appBuildVersion } | ConvertTo-Json)
 
             if (-not $second_response) {
-                Write-Error "Error: Failed to perform assign the application to the specified team. Although the scan will complete, the results will not be visible in the console UI. Set Debug to 1 to troubleshoot."
+                Write-Error "Error: Failed to perform assign the application to the specified team. Although the scan will complete, the results will not be visible in the console UI. Use -Debug to troubleshoot."
             }
         }
     } else {
@@ -204,17 +197,10 @@ if (-not $report_file_name) {
 }
 
 # Download the report
-try {
-    Invoke-RestMethod -Uri "$server_url$download_assessment_url/$AssessmentID/$report_format" -Authentication Bearer -Token $access_token -OutFile $full_report_file_name
-} catch {
-    Write-Error "Error downloading the report."
-    exit 1
-}
+Invoke-RestMethod -Uri "$server_url$download_assessment_url/$AssessmentID/$report_format" -Authentication Bearer -Token $access_token -OutFile $full_report_file_name
 
 # Print confirmation message
 Write-Output "Response saved to: $full_report_file_name"
 $env:ZSCAN_REPORT_FILE = $full_report_file_name
 
-if ($env:ZSCAN_DEBUG) {
-    Get-ChildItem -Force
-}
+Write-Debug (Get-ChildItem)
