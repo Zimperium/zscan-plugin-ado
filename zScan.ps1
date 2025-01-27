@@ -29,6 +29,9 @@ Write-Debug $PWD
 [string]$complete_upload_url = "/api/zdev-app/public/v1/apps"
 [string]$download_assessment_url = "/api/zdev-app/public/v1/assessments"
 
+[int]$processing_delay = 15 # seconds; periodic delays to allow the server to process the request
+[int]$http_retry_count = 3 # number of times to retry HTTP requests]
+
 [string]$AssessmentID = ""
 [string]$ScanStatus = "Submitted"
 [string]$ciToolId = "ADO"
@@ -69,8 +72,10 @@ if ($wait_interval -lt 30) {
 $server_url = $server_url.TrimEnd(' ', '/')
 Write-Output "Using zConsole at $server_url"
 
-# Execute the curl command with the server URL
-$response = Invoke-RestMethod -Uri "$server_url$login_url" -Method Post -ContentType "application/json" -Body (@{ clientId = $client_id; secret = $secret } | ConvertTo-Json)
+# Login to obtain bearer token
+$response = Invoke-RestMethod -Uri "$server_url$login_url" -Method Post `
+    -MaximumRetryCount $http_retry_count `
+    -ContentType "application/json" -Body (@{ clientId = $client_id; secret = $secret } | ConvertTo-Json)
 $secret = $null
 Write-Debug "Login Response: $response"
 
@@ -93,8 +98,12 @@ if ($response) {
     exit 3
 }
 
-$response = Invoke-RestMethod -Uri "$server_url$upload_url" -Method Post -Authentication Bearer -Token $access_token -ContentType "multipart/form-data" -Form @{ buildFile = Get-Item $input_file; buildNumber = $build_number; environment = $environment; branchName = $branch_name; ciToolId = $ciToolId; ciToolName = $ciToolName }
-Write-Debug "Upload Response: $response"
+$response = Invoke-RestMethod -Uri "$server_url$upload_url" -Method Post `
+    -Authentication Bearer -Token $access_token `
+    -StatusCodeVariable http_status `
+    -MaximumRetryCount $http_retry_count `
+    -ContentType "multipart/form-data" -Form @{ buildFile = Get-Item $input_file; buildNumber = $build_number; environment = $environment; branchName = $branch_name; ciToolId = $ciToolId; ciToolName = $ciToolName }
+Write-Debug "Upload Status: $http_response `n Response: $response"
 
 # Check for successful response
 if ($response) {
@@ -130,8 +139,11 @@ if ($null -eq $teamId) {
     Write-Output "Assigning the application to team $team_name."
 
     # Fetch the list of teams using the access token
-    $teams_response = Invoke-RestMethod -Uri "$server_url$teams_url" -Method Get -Authentication Bearer -Token $access_token
-    Write-Debug "Team List Response: $teams_response"
+    $teams_response = Invoke-RestMethod -Uri "$server_url$teams_url" -Method Get `
+        -Authentication Bearer -Token $access_token `
+        -StatusCodeVariable http_status `
+        -MaximumRetryCount $http_retry_count
+    Write-Debug "Team List Status: $http_response `n Response: $teams_response"
 
     if ($teams_response) {
         $teamId = $teams_response.content | Where-Object { $_.name -eq $team_name } | Select-Object -ExpandProperty id
@@ -142,16 +154,25 @@ if ($null -eq $teamId) {
         } else {
             Write-Output "Successfully extracted teamId: '$teamId' for Team named: '$team_name'."
 
-            # Perform the second API call to complete the upload
-            $second_response = Invoke-RestMethod -Uri "$server_url$complete_upload_url/$zdevAppId/upload" -Method Put -Authentication Bearer -Token $access_token -ContentType "application/json" -Body (@{ teamId = $teamId; buildNumber = $appBuildVersion } | ConvertTo-Json)
-            Write-Debug "Complete Upload Response: $second_response"
+            # Wait for the server to process the upload
+            Start-Sleep -Seconds $processing_delay
 
-            if (-not $second_response) {
-                Write-Error "Failed to perform assign the application to the specified team. Although the scan will complete, the results will not be visible in the console UI."
+            # Perform the second API call to complete the upload
+            $second_response = Invoke-RestMethod -Uri "$server_url$complete_upload_url/$zdevAppId/upload" -Method Put `
+                -Authentication Bearer -Token $access_token `
+                -MaximumRetryCount $http_retry_count `
+                -ContentType "application/json" `
+                -SkipHttpErrorCheck `
+                -StatusCodeVariable http_status `
+                -Body (@{ teamId = $teamId; buildNumber = $appBuildVersion } | ConvertTo-Json)
+            Write-Debug "Complete Upload Status: $http_status `n Response: $second_response"
+
+            if (([int]$http_status) -ge 400) {
+                Write-Warning "Failed to perform assign the application to the specified team. Although the scan will complete, the results will not be visible in the console UI."
             }
         }
     } else {
-        Write-Error "Failed to extract the list of teams from your console. Although the scan will complete, the results will not be visible in the console UI. Please ensure you have granted the Authorization token the 'view teams' permission under the 'Common' category, within the console's Authorization settings."
+        Write-Warning "Failed to extract the list of teams from your console. Although the scan will complete, the results will not be visible in the console UI. Please ensure you have granted the Authorization token the 'view teams' permission under the 'Common' category, within the console's Authorization settings."
     }
 }
 
@@ -162,13 +183,18 @@ if (-not $wait_for_report) {
 }
 
 # Wait for the upload to complete processing
-Start-Sleep -Seconds 10
+Start-Sleep -Seconds $processing_delay
 
 # Check the Status in a loop - wait for Interval
 while ($true) {
     # Check the Status
-    $response = Invoke-RestMethod -Uri "$server_url$status_url$buildId" -Method Get -Authentication Bearer -Token $access_token -ContentType "application/json"
+    $response = Invoke-RestMethod -Uri "$server_url$status_url$buildId" -Method Get `
+        -Authentication Bearer -Token $access_token `
+        -SkipHttpErrorCheck `
+        -StatusCodeVariable http_status `
+        -ContentType "application/json"
 
+    Write-Debug "Status Response: $http_status"
     if ($response) {
         $ScanStatus = $response.zdevMetadata.analysis
 
@@ -183,9 +209,13 @@ while ($true) {
         Write-Debug "Status Response: $response"
         Write-Error "Error Checking the Status of Scan."
     }
+
     # Sleep for the interval
     Start-Sleep -Seconds $wait_interval
 }
+
+# Sleep to give the server some time to prepare the report
+Start-Sleep -Seconds $processing_delay
 
 # Retrieve the report
 # Figure out report's fully qualified file name
@@ -197,7 +227,13 @@ if (-not $report_file_name) {
 }
 
 # Download the report
-Invoke-RestMethod -Uri "$server_url$download_assessment_url/$AssessmentID/$report_format" -Authentication Bearer -Token $access_token -OutFile $full_report_file_name
+Invoke-RestMethod -Uri "$server_url$download_assessment_url/$AssessmentID/$report_format" -Method Get `
+    -Authentication Bearer -Token $access_token `
+    -MaximumRetryCount $http_retry_count `
+    -StatusCodeVariable http_status `
+    -OutFile $full_report_file_name
+
+Write-Debug "Download report status: $http_status"
 
 # Print confirmation message
 Write-Output "Response saved to: $full_report_file_name"
