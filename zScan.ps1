@@ -1,17 +1,17 @@
 param(
-    [string]$server_url = "https://zc202.zimperium.com",
-    [string]$client_id = $env:ZSCAN_CLIENT_ID,
-    [string]$secret = $env:ZSCAN_CLIENT_SECRET,
-    [string]$team_name = "Default",
-    [Parameter(Mandatory)][string]$input_file,
-    [string]$report_format = "sarif",
-    [string]$report_location = '.',
-    [string]$report_file_name,
-    [bool]$wait_for_report = $true,
-    [int]$wait_interval = 30,
-    [string]$branch_name,
-    [string]$build_number,
-    [string]$environment
+    [string]$server_url = "https://zc202.zimperium.com", # zConsole URL
+    [string]$client_id = $env:ZSCAN_CLIENT_ID, # Client ID from zConsole - Authorizations Tab
+    [string]$secret = $env:ZSCAN_CLIENT_SECRET, # Secret from zConsole - Authorizations Tab
+    [string]$team_name = "Default", # Team name to assign the application to
+    [Parameter(Mandatory)][string]$input_file, # Path to the APK/IPA file
+    [string]$report_format = "sarif", # Output format [json, sarif]
+    [string]$report_location = '.', # Location (folder) to save the report
+    [string]$report_file_name, # File name to save the report
+    [bool]$wait_for_report = $true, # Wait for and download the report; exit after upload if false
+    [int]$polling_interval = 30, # Interval to wait for report (in seconds)
+    [string]$branch_name, # Branch name (optional)
+    [string]$build_number, # Build number (optional)
+    [string]$environment # Environment (optional)
 )
 
 # Exit on error
@@ -29,13 +29,14 @@ Write-Debug $PWD
 [string]$complete_upload_url = "/api/zdev-app/public/v1/apps"
 [string]$download_assessment_url = "/api/zdev-app/public/v1/assessments"
 
-[int]$processing_delay = 15 # seconds; periodic delays to allow the server to process the request
+[int]$processing_delay = 15 # seconds; periodic delays to allow the server to process the previous request
 [int]$http_retry_count = 3 # number of times to retry HTTP requests]
-
-[string]$AssessmentID = ""
-[string]$ScanStatus = "Submitted"
 [string]$ciToolId = "ADO"
 [string]$ciToolName = "Azure DevOps"
+
+# internal variables
+[string]$AssessmentID = ""
+[string]$ScanStatus = "Submitted"
 
 # Input Validation
 # Input file must be specified
@@ -63,9 +64,9 @@ if ($report_format -ne "json" -and $report_format -ne "sarif") {
 }
 
 # Minimum wait time is 30 seconds; we don't want to DDOS our own servers
-if ($wait_interval -lt 30) {
+if ($polling_interval -lt 30) {
     Write-Information "Wait interval is less than 30 seconds. Setting it to 30 seconds."
-    $wait_interval = 30
+    $polling_interval = 30
 }
 
 # Remove trailing spaces and slashes
@@ -75,11 +76,12 @@ Write-Output "Using zConsole at $server_url"
 # Login to obtain bearer token
 $response = Invoke-RestMethod -Uri "$server_url$login_url" -Method Post `
     -MaximumRetryCount $http_retry_count `
-    -ContentType "application/json" -Body (@{ clientId = $client_id; secret = $secret } | ConvertTo-Json)
+    -ContentType "application/json" `
+    -Body (@{ clientId = $client_id; secret = $secret } | ConvertTo-Json)
 $secret = $null
 Write-Debug "Login Response: $response"
 
-# Check if the curl command was successful
+# Check if the login was successful
 if ($response) {
     $access_token = $response.accessToken
 
@@ -211,7 +213,7 @@ while ($true) {
     }
 
     # Sleep for the interval
-    Start-Sleep -Seconds $wait_interval
+    Start-Sleep -Seconds $polling_interval
 }
 
 # Sleep to give the server some time to prepare the report
