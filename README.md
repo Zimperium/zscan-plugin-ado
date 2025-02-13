@@ -60,7 +60,7 @@ Here's a _sample_ zScan pipeline snippet that downloads the script and uploads a
     targetType: 'inline'
     script:  |
       # Define the URL of the PowerShell script
-      $scriptUrl = "https://raw.githubusercontent.com/Zimperium/zscan-plugin-ado/refs/heads/master/zScan.ps1"
+      $scriptUrl = "https://github.com/Zimperium/zscan-plugin-ado/releases/download/v1.0.1/zScan.ps1"
 
       # Define the local path where the script will be saved
       $scriptPath = "$(Build.SourcesDirectory)\zScan.ps1"
@@ -76,7 +76,8 @@ Here's a _sample_ zScan pipeline snippet that downloads the script and uploads a
     ZSCAN_CLIENT_SECRET: $(ZSCAN_CLIENT_SECRET)
 ```
 
-The above example assumes that the clint id and client secret variables are correctly configured (the latter using a secret variable), and the input file filename is correct.  At this time, the script does not accept wildcards.
+The above example assumes that the clint id and client secret variables are correctly configured (the latter using a secret variable), and the input file filename is correct.  At this time, the script does not accept wildcards. 
+You can adjust the script URL to point to the tag/release of your choice.
 
 ## License
 
