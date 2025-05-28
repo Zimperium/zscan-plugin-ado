@@ -241,7 +241,7 @@ foreach ($current_file_info in $files_to_process) {
                 Write-Output "Scan $AssessmentID for file '${current_input_file}' is Done."
                 break
             } else {
-                Write-Output "Scan for '${current_input_file}' is not completed. Status: $ScanStatus. Waiting for $wait_interval seconds."
+                Write-Output "Scan for '${current_input_file}' is not completed. Status: $ScanStatus. Waiting for $polling_interval seconds."
             }
         } else {
             Write-Debug "Status Response for $current_input_file : $status_check_response"
@@ -250,7 +250,7 @@ foreach ($current_file_info in $files_to_process) {
         }
 
         # Sleep for the interval
-        Start-Sleep -Seconds $wait_interval
+        Start-Sleep -Seconds $polling_interval
     }
 
     # Sleep to give the server some time to prepare the report
