@@ -23,6 +23,7 @@ Write-Debug $PWD
 
 # internal constants
 [string]$login_url = "/api/auth/v1/api_keys/login"
+[string]$refresh_token_url = "/api/auth/v1/api_keys/access"
 [string]$upload_url = "/api/zdev-upload/public/v1/uploads/build"
 [string]$status_url = "/api/zdev-app/public/v1/assessments/status?buildId="
 [string]$teams_url = "/api/auth/public/v1/teams"
@@ -96,6 +97,7 @@ Write-Debug "Login Response: $response"
 # Check if the curl command was successful
 if ($response) {
     $access_token = $response.accessToken
+    $refresh_token = $response.refreshToken
 
     # Check if access token is found
     if ($access_token) {
@@ -130,7 +132,8 @@ foreach ($current_file_info in $files_to_process) {
     $upload_response = Invoke-RestMethod -Uri "$server_url$upload_url" -Method Post `
         -Authentication Bearer -Token $access_token `
         -StatusCodeVariable http_status_upload `
-        -ContentType "multipart/form-data" -Form @{ buildFile = Get-Item $current_input_file; buildNumber = $build_number; environment = $environment; branchName = $branch_name; ciToolId = $ciToolId; ciToolName = $ciToolName }
+        -ContentType "multipart/form-data" -Form @{ buildFile = Get-Item -Path $current_input_file; buildNumber = $build_number; environment = $environment; branchName = $branch_name; ciToolId = $ciToolId; ciToolName = $ciToolName }
+    
     Write-Debug "Upload Status for $current_input_file : $http_status_upload `n Response: $upload_response"
 
     # Check for successful response
@@ -249,12 +252,41 @@ foreach ($current_file_info in $files_to_process) {
     # Sleep to give the server some time to prepare the report
     Start-Sleep -Seconds $processing_delay
 
+    # Refresh the access token, since it might have expired during the long wait
+    $old_access_token = $access_token
+    $response = Invoke-RestMethod -Uri "$server_url$refresh_token_url" -Method Post `
+        -ContentType "application/json" -Body (@{ refreshToken = $refresh_token } | ConvertTo-Json)
+
+    Write-Debug "Login Response: $response"
+
+    # Check if the call was successful
+    if ($response) {
+        $access_token = $response.accessToken
+
+        # Check if access token is found
+        if ($access_token) {
+            $refresh_token = $response.refreshToken
+            Write-Output "Successfully obtained access token."
+
+            # convert to secure string as required by Invoke-RestMethod
+            $access_token = ConvertTo-SecureString $access_token -AsPlainText -Force
+        } else {
+            Write-Error "Access token not found in response. Restoring the old access token."
+            # Restore the old access token
+            $access_token = $old_access_token
+        }
+    } else {
+        Write-Error "Unable to obtain access token. Restoring the old access token."
+        # Restore the old access token
+        $access_token = $old_access_token
+    }
+
     # Retrieve the report
     # Figure out report's fully qualified file name
     [string]$full_report_file_name_current_file = ""
     if (-not $report_file_name) {
         $base_name_for_report = [System.IO.Path]::GetFileNameWithoutExtension($current_input_file)
-        $full_report_file_name_current_file = Join-Path $report_location "zscan-results-$base_name_for_report-$AssessmentID-$report_format.json"
+        $full_report_file_name_current_file = Join-Path $report_location "zscan-results-$base_name_for_report-$AssessmentID.$report_format"
     } else {
         if ($files_to_process.Count -gt 1) {
             $input_file_base_for_report_name = [System.IO.Path]::GetFileNameWithoutExtension($current_input_file)
