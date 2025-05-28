@@ -77,7 +77,6 @@ Here's a _sample_ zScan pipeline snippet that downloads the script and uploads a
 ```
 
 The above example assumes that the clint id and client secret variables are correctly configured (the latter using a secret variable), and the input file filename is correct.
-
 You can adjust the script URL to point to the tag/release of your choice.
 
 ## License
