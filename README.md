@@ -29,7 +29,7 @@ These parameters are mandatory, _unless_ a default value is available as describ
 - **server_url**: console base URL, e.g., `https://ziap.zimperium.com/`.
 - **client_id** and **secret**: API credentials that can be obtained from the console (see the [Prerequisites](#prerequisites) section above).
 - **input_file**: the path to the binary or binaries relative to the current workspace. Wildcards are supported, but the script will accept at most 5 files to avoid accidentally uploading too many files. If the pattern matches more than 5 files, you will need to narrow it down. **Note**: Depending on the environment, the script may not be able to access files outside of the current directory or its subdirectories.
--- **team_name**: name of the team to which this application belongs.  This is required only if submitting the application for the first time; values are ignored if the application already exists in the console and assigned to a team.  If not supplied, the application will be assigned to the 'Default' team
+- **team_name**: name of the team to which this application belongs.  This is required only if submitting the application for the first time; values are ignored if the application already exists in the console and assigned to a team.  If not supplied, the application will be assigned to the 'Default' team
 - **report_format**: the format of the scan report. Supported values are 'json', 'sarif' (default), and 'pdf'. For more information on the SARIF format, please see [OASIS Open](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html). Use 'pdf' to download a PDF report (requires an extra API call).
 
 ### Optional
