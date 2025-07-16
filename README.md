@@ -29,22 +29,29 @@ These parameters are mandatory, _unless_ a default value is available as describ
 - **server_url**: console base URL, e.g., `https://ziap.zimperium.com/`.
 - **client_id** and **secret**: API credentials that can be obtained from the console (see the [Prerequisites](#prerequisites) section above).
 - **input_file**: the path to the binary or binaries relative to the current workspace. Wildcards are supported, but the script will accept at most 5 files to avoid accidentally uploading too many files. If the pattern matches more than 5 files, you will need to narrow it down. **Note**: Depending on the environment, the script may not be able to access files outside of the current directory or its subdirectories.
-- **team_name**: name of the team to which this application belongs.  This is required only if submitting the application for the first time; values are ignored if the application already exists in the console and assigned to a team.  If not supplied, the application will be assigned to the 'Default' team
-- **report_format**: the format of the scan report, either 'json' or 'sarif' (default).  For more information on the SARIF format, please see [OASIS Open](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html).
+-- **team_name**: name of the team to which this application belongs.  This is required only if submitting the application for the first time; values are ignored if the application already exists in the console and assigned to a team.  If not supplied, the application will be assigned to the 'Default' team
+- **report_format**: the format of the scan report. Supported values are 'json', 'sarif' (default), and 'pdf'. For more information on the SARIF format, please see [OASIS Open](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html). Use 'pdf' to download a PDF report (requires an extra API call).
 
 ### Optional
 
 These parameters are optional, but may be used to supply additional information about the build and/or control the plugin's output.
 
 - **report_location**: destination folder for the vulnerability report. If not provided, the report is stored in the current workspace. Report location and name are important for [Pipeline Artifact](https://learn.microsoft.com/en-us/azure/devops/pipelines/tasks/reference/publish-pipeline-artifact-v1) collection.
-- **report_file_name**: filename of the report. If not provided, the filename will be patterned as follows: zscan-results-AssessmentID.report_format, e.g., _zscan-results-123456789.sarif_. If multiple files match the provided pattern, filename of the uploaded file will be appended to the _report_file_name_ to avoid overwriting reports; the extension will be preserved.
+- **report_file_name**: filename of the report. If not provided, the filename will be patterned as follows:
+   - For SARIF: `zscan-results-<input>-<AssessmentID>.sarif`
+   - For JSON: `zscan-results-<input>-<AssessmentID>.json`
+   - For PDF: `zscan-results-<input>-<AssessmentID>.pdf`
+  If multiple files match the provided pattern, the input filename will be appended to the _report_file_name_ to avoid overwriting reports; the extension will be preserved.
 - **wait_for_report**: if set to "true" (default), the script will wait for the assessment report to be complete. Otherwise, the script will exit after uploading the binary to zScan.  The assessment report can be obtained through the console. Report filename and location parameters are ignored. No artifact will be produced.
 - **polling_interval**: wait time for polling the server in seconds. 30 seconds is the default and the minimum acceptable value.
 - **branch_name**: source code branch that the build is based on.
 - **build_number**: application build number.
 - **environment**: target environment, e.g., uat, dev, prod.
 
-**Note:** The script supports enhanced diagnostic output if the `-Debug` parameter is supplied. You can use this output to troubleshoot problems with the script. Be advised that **debug output may include sensitive information**, such as authorization tokens. Use at your own risk.
+**Note:**
+- The script supports enhanced diagnostic output if the `-Debug` parameter is supplied. You can use this output to troubleshoot problems with the script. Be advised that **debug output may include sensitive information**, such as authorization tokens. Use at your own risk.
+- When using `report_format: pdf`, the script will first request a download URL from the API, then download the PDF from that URL. This is handled automatically for each file.
+- SARIF, JSON, and PDF reports are saved with the appropriate extension and include the input filename and assessment ID for uniqueness.
 
 ## Usage
 
@@ -69,14 +76,20 @@ Here's a _sample_ zScan pipeline snippet that downloads the script and uploads a
       Invoke-WebRequest -Uri $scriptUrl -OutFile $scriptPath
 
       # Execute the script
+      # SARIF format (the default)
       & $scriptPath -server_url 'https://ziap.zimperium.com' -input_file '$(Build.SourcesDirectory)/app/build/outputs/apk/debug/*.apk' -client_id ${env:ZSCAN_CLIENT_ID} -secret ${env:ZSCAN_CLIENT_SECRET} -branch_name $(Build.SourceBranchName) -build_number $(Build.BuildNumber)
 
-      Write-Output "Report: ${env:ZSCAN_REPORT_FILE}"
+      # **OR**
+
+      # PDF format
+      & $scriptPath -server_url 'https://ziap.zimperium.com' -input_file '$(Build.SourcesDirectory)/app/build/outputs/apk/debug/*.apk' -client_id ${env:ZSCAN_CLIENT_ID} -secret ${env:ZSCAN_CLIENT_SECRET} -branch_name $(Build.SourceBranchName) -build_number $(Build.BuildNumber) -report_format pdf
+
+      Write-Output "Report(s): ${env:ZSCAN_REPORT_FILE}"
   env:
     ZSCAN_CLIENT_SECRET: $(ZSCAN_CLIENT_SECRET)
 ```
 
-The above example assumes that the clint id and client secret variables are correctly configured (the latter using a secret variable), and the input file filename is correct.
+The above example assumes that the client id and client secret variables are correctly configured (the latter using a secret variable), and the input file filename is correct. The environment variable `ZSCAN_REPORT_FILE` will contain a comma-separated list of all generated report files.
 You can adjust the script URL to point to the tag/release of your choice.
 
 ## License
