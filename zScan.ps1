@@ -53,9 +53,10 @@ if (-not $client_id -or -not $secret) {
     exit 1
 }
 
-# Output format must be one of [json, sarif]
-if ($report_format -ne "json" -and $report_format -ne "sarif") {
-    Write-Error "Output format must be one of [json, sarif]."
+# Output format must be one of [json, sarif, pdf]
+$report_format = $report_format.ToLowerInvariant()
+if ($report_format -ne "json" -and $report_format -ne "sarif" -and $report_format -ne "pdf") {
+    Write-Error "Output format must be one of [json, sarif, pdf]."
     exit 1
 }
 
@@ -288,9 +289,15 @@ foreach ($current_file_info in $files_to_process) {
     # Retrieve the report
     # Figure out report's fully qualified file name
     [string]$full_report_file_name_current_file = ""
+    $base_name_for_report = [System.IO.Path]::GetFileNameWithoutExtension($current_input_file)
     if (-not $report_file_name) {
-        $base_name_for_report = [System.IO.Path]::GetFileNameWithoutExtension($current_input_file)
-        $full_report_file_name_current_file = Join-Path $report_location "zscan-results-$base_name_for_report-$AssessmentID.$report_format"
+        if ($report_format -eq "pdf") {
+            $full_report_file_name_current_file = Join-Path $report_location "zscan-results-$base_name_for_report-$AssessmentID.pdf"
+        } elseif ($report_format -eq "sarif") {
+            $full_report_file_name_current_file = Join-Path $report_location "zscan-results-$base_name_for_report-$AssessmentID.sarif"
+        } else {
+            $full_report_file_name_current_file = Join-Path $report_location "zscan-results-$base_name_for_report-$AssessmentID.json"
+        }
     } else {
         if ($files_to_process.Count -gt 1) {
             $input_file_base_for_report_name = [System.IO.Path]::GetFileNameWithoutExtension($current_input_file)
@@ -299,26 +306,48 @@ foreach ($current_file_info in $files_to_process) {
             $full_report_file_name_current_file = Join-Path $report_location "${report_file_base_original}_${input_file_base_for_report_name}${report_file_ext_original}"
             Write-Warning "Multiple files are processed with 'report_file_name' specified. Modifying report name for '${current_input_file}' to '${full_report_file_name_current_file}'."
         } else {
-            # Single file processed (either by pattern or direct name), use the provided $report_file_name
             $full_report_file_name_current_file = Join-Path $report_location $report_file_name
         }
     }
 
     # Download the report
-    Invoke-RestMethod -Uri "$server_url$download_assessment_url/$AssessmentID/$report_format" -Method Get `
-        -Authentication Bearer -Token $access_token `
-        -StatusCodeVariable http_status_download `
-        -OutFile $full_report_file_name_current_file
-
-    Write-Debug "Download report status for $current_input_file : $http_status_download"
-
-    if ($http_status_download -ge 200 -and $http_status_download -lt 300) {
-        Write-Output "Report for '${current_input_file}' saved to: $full_report_file_name_current_file"
-        $all_report_files.Add($full_report_file_name_current_file)
-    } else {
-        Write-Error "Failed to download report for '${current_input_file}'. HTTP Status: $http_status_download. Report URL might have been: $server_url$download_assessment_url/$AssessmentID/$report_format"
-        $global_exit_code = 1
-        # Continue to next file, this one failed at report download
+    if ($report_format -eq "json" -or $report_format -eq "sarif") {
+        Invoke-RestMethod -Uri "$server_url$download_assessment_url/$AssessmentID/$report_format" -Method Get `
+            -Authentication Bearer -Token $access_token `
+            -StatusCodeVariable http_status_download `
+            -OutFile $full_report_file_name_current_file
+        Write-Debug "Download report status for $current_input_file : $http_status_download"
+        if ($http_status_download -ge 200 -and $http_status_download -lt 300) {
+            Write-Output "Report for '${current_input_file}' saved to: $full_report_file_name_current_file"
+            $all_report_files.Add($full_report_file_name_current_file)
+        } else {
+            Write-Error "Failed to download report for '${current_input_file}'. HTTP Status: $http_status_download. Report URL might have been: $server_url$download_assessment_url/$AssessmentID/$report_format"
+            $global_exit_code = 1
+            continue
+        }
+    } elseif ($report_format -eq "pdf") {
+        # Step 1: Get the report URL from the API
+        $pdf_response = Invoke-RestMethod -Uri "$server_url$download_assessment_url/$AssessmentID/report" -Method Get `
+            -Authentication Bearer -Token $access_token `
+            -StatusCodeVariable http_status_download
+        Write-Debug "PDF report API response for ${current_input_file}: ${pdf_response}"
+        $report_url = $pdf_response.cdn_link
+        if (-not $report_url) {
+            Write-Error "Failed to extract report URL from response for '${current_input_file}'."
+            $global_exit_code = 1
+            continue
+        }
+        # Step 2: Download the PDF from the URL
+        try {
+            Invoke-WebRequest -Uri $report_url -OutFile $full_report_file_name_current_file -UseBasicParsing
+            Write-Debug "Downloaded PDF report to $full_report_file_name_current_file"
+            Write-Output "Report for '${current_input_file}' saved to: $full_report_file_name_current_file"
+            $all_report_files.Add($full_report_file_name_current_file)
+        } catch {
+            Write-Error "Failed to download PDF report from $report_url for '${current_input_file}'"
+            $global_exit_code = 1
+            continue
+        }
     }
     
 } # End foreach ($current_file_info in $files_to_process)
