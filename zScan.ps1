@@ -137,7 +137,7 @@ foreach ($current_file_info in $files_to_process) {
     $upload_response = Invoke-RestMethod -Uri "$server_url$upload_url" -Method Post `
         -Authentication Bearer -Token $access_token `
         -StatusCodeVariable http_status_upload `
-        -ContentType "multipart/form-data" -Form @{ buildFile = Get-Item -Path $current_input_file; buildNumber = $build_number; environment = $environment; branchName = $branch_name; ciToolId = $ciToolId; ciToolName = $ciToolName }
+        -ContentType "multipart/form-data" -Form @{ buildFile = Get-Item -LiteralPath $current_input_file; buildNumber = $build_number; environment = $environment; branchName = $branch_name; ciToolId = $ciToolId; ciToolName = $ciToolName }
     
     Write-Debug "Upload Status for $current_input_file : $http_status_upload `n Response: $upload_response"
 
