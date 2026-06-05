@@ -4,11 +4,13 @@ param(
     [string]$secret = $env:ZSCAN_CLIENT_SECRET, # Secret from zConsole - Authorizations Tab
     [string]$team_name = "Default", # Team name to assign the application to
     [Parameter(Mandatory)][string]$input_file, # Path to the APK/IPA file
-    [string]$report_format = "sarif", # Output format [json, sarif]
+    [string]$report_format = "sarif", # Output format [json, sarif, pdf]
     [string]$report_location = '.', # Location (folder) to save the report
     [string]$report_file_name, # File name to save the report
     [bool]$wait_for_report = $true, # Wait for and download the report; exit after upload if false
+    [int]$report_timeout = 3600, # Maximum time to wait for report generation (in seconds)
     [int]$polling_interval = 30, # Interval to wait for report (in seconds)
+    [int]$network_timeout = 600, # Timeout for HTTP requests (in seconds)
     [string]$branch_name, # Branch name (optional)
     [string]$build_number, # Build number (optional)
     [string]$environment # Environment (optional)
@@ -31,8 +33,9 @@ Write-Debug $PWD
 [string]$download_assessment_url = "/api/zdev-app/public/v1/assessments"
 
 [int]$processing_delay = 15 # seconds; periodic delays to allow the server to process the previous request
-[int]$http_retry_count = 3 # number of times to retry HTTP requests]
+[int]$http_retry_count = 3 # number of times to retry HTTP requests
 [int]$max_files = 5 # Maximum number of files to process if wildcard matches multiple
+[int]$token_refresh_interval = 15 # minutes; how often to refresh the access token as a precaution
 [string]$ciToolId = "ADO"
 [string]$ciToolName = "Azure DevOps"
 
@@ -136,8 +139,12 @@ foreach ($current_file_info in $files_to_process) {
 
     $upload_response = Invoke-RestMethod -Uri "$server_url$upload_url" -Method Post `
         -Authentication Bearer -Token $access_token `
+        -MaximumRetryCount $http_retry_count `
+        -TimeoutSec $network_timeout `
+        -SkipCertificateCheck `
         -StatusCodeVariable http_status_upload `
-        -ContentType "multipart/form-data" -Form @{ buildFile = Get-Item -LiteralPath $current_input_file; buildNumber = $build_number; environment = $environment; branchName = $branch_name; ciToolId = $ciToolId; ciToolName = $ciToolName }
+        -ContentType "multipart/form-data" -Form @{ buildFile = Get-Item -LiteralPath $current_input_file; buildNumber = $build_number; environment = $environment; branchName = $branch_name; ciToolId = $ciToolId; ciToolName = $ciToolName } `
+        5>$null # Redirecting the verbose stream to null to suppress multipart form data content in debug logs; adjust as needed for troubleshooting
     
     Write-Debug "Upload Status for $current_input_file : $http_status_upload `n Response: $upload_response"
 
@@ -225,7 +232,55 @@ foreach ($current_file_info in $files_to_process) {
     Start-Sleep -Seconds $processing_delay
 
     # Check the Status in a loop - wait for Interval
+    $start_time = $last_refresh_time = Get-Date
+    $timeout_occurred = $false
     while ($true) {
+        # Check if timeout has been exceeded
+        $elapsed_seconds = (Get-Date) - $start_time
+        if ($elapsed_seconds.TotalSeconds -gt $report_timeout) {
+            Write-Output "Report generation timeout exceeded for file '${current_input_file}' (Build ID: $buildId). Report will be available in the console. Continuing to next file."
+            Write-Debug "Elapsed time: $($elapsed_seconds.TotalSeconds) seconds. Timeout: $report_timeout seconds."
+            $timeout_occurred = $true
+            break
+        }
+
+        # check if it's time to refresh the access token (refresh every $oken_refresh_interval minutes as a precaution, even if tokens typically last longer)
+        $time_since_last_refresh = (Get-Date) - $last_refresh_time
+        if ($time_since_last_refresh.TotalMinutes -ge $token_refresh_interval) {
+            Write-Debug "Refreshing access token as a precaution (last refresh was $($time_since_last_refresh.TotalMinutes) minutes ago) for file '$current_input_file' (Build ID: $buildId)."
+            
+            # Refresh the access token
+            $old_access_token = $access_token
+            $response = Invoke-RestMethod -Uri "$server_url$refresh_token_url" -Method Post `
+                -ContentType "application/json" -Body (@{ refreshToken = $refresh_token } | ConvertTo-Json)
+
+            Write-Debug "Login Response: $response"
+
+            # Check if the call was successful
+            if ($response) {
+                $access_token = $response.accessToken
+
+                # Check if access token is found
+                if ($access_token) {
+                    $refresh_token = $response.refreshToken
+                    Write-Output "Successfully refreshed access token."
+
+                    # convert to secure string as required by Invoke-RestMethod
+                    $access_token = ConvertTo-SecureString $access_token -AsPlainText -Force
+
+                    $last_refresh_time = Get-Date # Update the last refresh time
+                } else {
+                    Write-Error "Access token not found in response. Restoring the old access token. Check Debug logs for details."
+                    # Restore the old access token
+                    $access_token = $old_access_token
+                }
+            } else {
+                Write-Error "Unable to refresh access token. Restoring the old access token. Check Debug logs for details."
+                # Restore the old access token
+                $access_token = $old_access_token
+            }
+        }
+
         # Check the Status
         $status_check_response = Invoke-RestMethod -Uri "$server_url$status_url$buildId" -Method Get `
             -Authentication Bearer -Token $access_token `
@@ -254,37 +309,13 @@ foreach ($current_file_info in $files_to_process) {
         Start-Sleep -Seconds $polling_interval
     }
 
+    if($timeout_occurred) {
+        # If timeout occurred, skip to the next file without attempting to download the report
+        continue
+    }
+    
     # Sleep to give the server some time to prepare the report
     Start-Sleep -Seconds $processing_delay
-
-    # Refresh the access token, since it might have expired during the long wait
-    $old_access_token = $access_token
-    $response = Invoke-RestMethod -Uri "$server_url$refresh_token_url" -Method Post `
-        -ContentType "application/json" -Body (@{ refreshToken = $refresh_token } | ConvertTo-Json)
-
-    Write-Debug "Login Response: $response"
-
-    # Check if the call was successful
-    if ($response) {
-        $access_token = $response.accessToken
-
-        # Check if access token is found
-        if ($access_token) {
-            $refresh_token = $response.refreshToken
-            Write-Output "Successfully obtained access token."
-
-            # convert to secure string as required by Invoke-RestMethod
-            $access_token = ConvertTo-SecureString $access_token -AsPlainText -Force
-        } else {
-            Write-Error "Access token not found in response. Restoring the old access token."
-            # Restore the old access token
-            $access_token = $old_access_token
-        }
-    } else {
-        Write-Error "Unable to obtain access token. Restoring the old access token."
-        # Restore the old access token
-        $access_token = $old_access_token
-    }
 
     # Retrieve the report
     # Figure out report's fully qualified file name
