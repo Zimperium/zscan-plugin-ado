@@ -32,7 +32,7 @@ Write-Debug $PWD
 [string]$complete_upload_url = "/api/zdev-app/public/v1/apps"
 [string]$download_assessment_url = "/api/zdev-app/public/v1/assessments"
 
-[int]$processing_delay = 15 # seconds; periodic delays to allow the server to process the previous request
+[int]$processing_delay = 30 # seconds; periodic delays to allow the server to process the previous request
 [int]$http_retry_count = 3 # number of times to retry HTTP requests
 [int]$max_files = 5 # Maximum number of files to process if wildcard matches multiple
 [int]$token_refresh_interval = 15 # minutes; how often to refresh the access token as a precaution
@@ -179,6 +179,10 @@ foreach ($current_file_info in $files_to_process) {
         continue
     }
 
+    # Wait for the server to process the upload
+    Write-Debug "Waiting $processing_delay seconds for the server to process the upload of '${current_input_file}' before proceeding with team assignment and status checks."
+    Start-Sleep -Seconds $processing_delay
+
     # Assign to a team if this is a new application - teamId is null
     $teamId = $upload_response.teamId # From current file's upload response
     if ($null -eq $teamId) {
@@ -200,9 +204,6 @@ foreach ($current_file_info in $files_to_process) {
                 continue
             } else {
                 Write-Output "Successfully extracted teamId: '${teamId}' for Team named: '${team_name}' for app from '${current_input_file}'."
-
-                # Wait for the server to process the upload
-                Start-Sleep -Seconds $processing_delay
 
                 # Perform the second API call to complete the upload
                 $second_response_body = Invoke-RestMethod -Uri "$server_url$complete_upload_url/$zdevAppId/upload" -Method Put `
@@ -227,9 +228,6 @@ foreach ($current_file_info in $files_to_process) {
         Write-Output "'wait_for_report' is false. Upload of '${current_input_file}' submitted. Moving to next file if any."
         continue # To the next file in $files_to_process
     }
-
-    # Wait for the upload to complete processing
-    Start-Sleep -Seconds $processing_delay
 
     # Check the Status in a loop - wait for Interval
     $start_time = $last_refresh_time = Get-Date
@@ -315,6 +313,7 @@ foreach ($current_file_info in $files_to_process) {
     }
     
     # Sleep to give the server some time to prepare the report
+    Write-Debug "Waiting an additional $processing_delay seconds before attempting to download the report for '${current_input_file}' to allow the server to prepare the report."
     Start-Sleep -Seconds $processing_delay
 
     # Retrieve the report
