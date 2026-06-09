@@ -4,11 +4,13 @@ param(
     [string]$secret = $env:ZSCAN_CLIENT_SECRET, # Secret from zConsole - Authorizations Tab
     [string]$team_name = "Default", # Team name to assign the application to
     [Parameter(Mandatory)][string]$input_file, # Path to the APK/IPA file
-    [string]$report_format = "sarif", # Output format [json, sarif]
+    [string]$report_format = "sarif", # Output format [json, sarif, pdf]
     [string]$report_location = '.', # Location (folder) to save the report
     [string]$report_file_name, # File name to save the report
     [bool]$wait_for_report = $true, # Wait for and download the report; exit after upload if false
+    [int]$report_timeout = 3600, # Maximum time to wait for report generation (in seconds)
     [int]$polling_interval = 30, # Interval to wait for report (in seconds)
+    [int]$network_timeout = 600, # Timeout for HTTP requests (in seconds)
     [string]$branch_name, # Branch name (optional)
     [string]$build_number, # Build number (optional)
     [string]$environment # Environment (optional)
@@ -30,9 +32,10 @@ Write-Debug $PWD
 [string]$complete_upload_url = "/api/zdev-app/public/v1/apps"
 [string]$download_assessment_url = "/api/zdev-app/public/v1/assessments"
 
-[int]$processing_delay = 15 # seconds; periodic delays to allow the server to process the previous request
-[int]$http_retry_count = 3 # number of times to retry HTTP requests]
+[int]$processing_delay = 30 # seconds; periodic delays to allow the server to process the previous request
+[int]$http_retry_count = 3 # number of times to retry HTTP requests
 [int]$max_files = 5 # Maximum number of files to process if wildcard matches multiple
+[int]$token_refresh_interval = 15 # minutes; how often to refresh the access token as a precaution
 [string]$ciToolId = "ADO"
 [string]$ciToolName = "Azure DevOps"
 
@@ -53,9 +56,10 @@ if (-not $client_id -or -not $secret) {
     exit 1
 }
 
-# Output format must be one of [json, sarif]
-if ($report_format -ne "json" -and $report_format -ne "sarif") {
-    Write-Error "Output format must be one of [json, sarif]."
+# Output format must be one of [json, sarif, pdf]
+$report_format = $report_format.ToLowerInvariant()
+if ($report_format -ne "json" -and $report_format -ne "sarif" -and $report_format -ne "pdf") {
+    Write-Error "Output format must be one of [json, sarif, pdf]."
     exit 1
 }
 
@@ -135,8 +139,12 @@ foreach ($current_file_info in $files_to_process) {
 
     $upload_response = Invoke-RestMethod -Uri "$server_url$upload_url" -Method Post `
         -Authentication Bearer -Token $access_token `
+        -MaximumRetryCount $http_retry_count `
+        -TimeoutSec $network_timeout `
+        -SkipCertificateCheck `
         -StatusCodeVariable http_status_upload `
-        -ContentType "multipart/form-data" -Form @{ buildFile = Get-Item -Path $current_input_file; buildNumber = $build_number; environment = $environment; branchName = $branch_name; ciToolId = $ciToolId; ciToolName = $ciToolName }
+        -ContentType "multipart/form-data" -Form @{ buildFile = Get-Item -LiteralPath $current_input_file; buildNumber = $build_number; environment = $environment; branchName = $branch_name; ciToolId = $ciToolId; ciToolName = $ciToolName } `
+        5>$null # Redirecting the verbose stream to null to suppress multipart form data content in debug logs; adjust as needed for troubleshooting
     
     Write-Debug "Upload Status for $current_input_file : $http_status_upload `n Response: $upload_response"
 
@@ -171,6 +179,10 @@ foreach ($current_file_info in $files_to_process) {
         continue
     }
 
+    # Wait for the server to process the upload
+    Write-Debug "Waiting $processing_delay seconds for the server to process the upload of '${current_input_file}' before proceeding with team assignment and status checks."
+    Start-Sleep -Seconds $processing_delay
+
     # Assign to a team if this is a new application - teamId is null
     $teamId = $upload_response.teamId # From current file's upload response
     if ($null -eq $teamId) {
@@ -192,9 +204,6 @@ foreach ($current_file_info in $files_to_process) {
                 continue
             } else {
                 Write-Output "Successfully extracted teamId: '${teamId}' for Team named: '${team_name}' for app from '${current_input_file}'."
-
-                # Wait for the server to process the upload
-                Start-Sleep -Seconds $processing_delay
 
                 # Perform the second API call to complete the upload
                 $second_response_body = Invoke-RestMethod -Uri "$server_url$complete_upload_url/$zdevAppId/upload" -Method Put `
@@ -220,11 +229,56 @@ foreach ($current_file_info in $files_to_process) {
         continue # To the next file in $files_to_process
     }
 
-    # Wait for the upload to complete processing
-    Start-Sleep -Seconds $processing_delay
-
     # Check the Status in a loop - wait for Interval
+    $start_time = $last_refresh_time = Get-Date
+    $timeout_occurred = $false
     while ($true) {
+        # Check if timeout has been exceeded
+        $elapsed_seconds = (Get-Date) - $start_time
+        if ($elapsed_seconds.TotalSeconds -gt $report_timeout) {
+            Write-Output "Report generation timeout exceeded for file '${current_input_file}' (Build ID: $buildId). Report will be available in the console. Continuing to next file."
+            Write-Debug "Elapsed time: $($elapsed_seconds.TotalSeconds) seconds. Timeout: $report_timeout seconds."
+            $timeout_occurred = $true
+            break
+        }
+
+        # check if it's time to refresh the access token (refresh every $oken_refresh_interval minutes as a precaution, even if tokens typically last longer)
+        $time_since_last_refresh = (Get-Date) - $last_refresh_time
+        if ($time_since_last_refresh.TotalMinutes -ge $token_refresh_interval) {
+            Write-Debug "Refreshing access token as a precaution (last refresh was $($time_since_last_refresh.TotalMinutes) minutes ago) for file '$current_input_file' (Build ID: $buildId)."
+            
+            # Refresh the access token
+            $old_access_token = $access_token
+            $response = Invoke-RestMethod -Uri "$server_url$refresh_token_url" -Method Post `
+                -ContentType "application/json" -Body (@{ refreshToken = $refresh_token } | ConvertTo-Json)
+
+            Write-Debug "Login Response: $response"
+
+            # Check if the call was successful
+            if ($response) {
+                $access_token = $response.accessToken
+
+                # Check if access token is found
+                if ($access_token) {
+                    $refresh_token = $response.refreshToken
+                    Write-Output "Successfully refreshed access token."
+
+                    # convert to secure string as required by Invoke-RestMethod
+                    $access_token = ConvertTo-SecureString $access_token -AsPlainText -Force
+
+                    $last_refresh_time = Get-Date # Update the last refresh time
+                } else {
+                    Write-Error "Access token not found in response. Restoring the old access token. Check Debug logs for details."
+                    # Restore the old access token
+                    $access_token = $old_access_token
+                }
+            } else {
+                Write-Error "Unable to refresh access token. Restoring the old access token. Check Debug logs for details."
+                # Restore the old access token
+                $access_token = $old_access_token
+            }
+        }
+
         # Check the Status
         $status_check_response = Invoke-RestMethod -Uri "$server_url$status_url$buildId" -Method Get `
             -Authentication Bearer -Token $access_token `
@@ -253,44 +307,27 @@ foreach ($current_file_info in $files_to_process) {
         Start-Sleep -Seconds $polling_interval
     }
 
-    # Sleep to give the server some time to prepare the report
-    Start-Sleep -Seconds $processing_delay
-
-    # Refresh the access token, since it might have expired during the long wait
-    $old_access_token = $access_token
-    $response = Invoke-RestMethod -Uri "$server_url$refresh_token_url" -Method Post `
-        -ContentType "application/json" -Body (@{ refreshToken = $refresh_token } | ConvertTo-Json)
-
-    Write-Debug "Login Response: $response"
-
-    # Check if the call was successful
-    if ($response) {
-        $access_token = $response.accessToken
-
-        # Check if access token is found
-        if ($access_token) {
-            $refresh_token = $response.refreshToken
-            Write-Output "Successfully obtained access token."
-
-            # convert to secure string as required by Invoke-RestMethod
-            $access_token = ConvertTo-SecureString $access_token -AsPlainText -Force
-        } else {
-            Write-Error "Access token not found in response. Restoring the old access token."
-            # Restore the old access token
-            $access_token = $old_access_token
-        }
-    } else {
-        Write-Error "Unable to obtain access token. Restoring the old access token."
-        # Restore the old access token
-        $access_token = $old_access_token
+    if($timeout_occurred) {
+        # If timeout occurred, skip to the next file without attempting to download the report
+        continue
     }
+    
+    # Sleep to give the server some time to prepare the report
+    Write-Debug "Waiting an additional $processing_delay seconds before attempting to download the report for '${current_input_file}' to allow the server to prepare the report."
+    Start-Sleep -Seconds $processing_delay
 
     # Retrieve the report
     # Figure out report's fully qualified file name
     [string]$full_report_file_name_current_file = ""
+    $base_name_for_report = [System.IO.Path]::GetFileNameWithoutExtension($current_input_file)
     if (-not $report_file_name) {
-        $base_name_for_report = [System.IO.Path]::GetFileNameWithoutExtension($current_input_file)
-        $full_report_file_name_current_file = Join-Path $report_location "zscan-results-$base_name_for_report-$AssessmentID.$report_format"
+        if ($report_format -eq "pdf") {
+            $full_report_file_name_current_file = Join-Path $report_location "zscan-results-$base_name_for_report-$AssessmentID.pdf"
+        } elseif ($report_format -eq "sarif") {
+            $full_report_file_name_current_file = Join-Path $report_location "zscan-results-$base_name_for_report-$AssessmentID.sarif"
+        } else {
+            $full_report_file_name_current_file = Join-Path $report_location "zscan-results-$base_name_for_report-$AssessmentID.json"
+        }
     } else {
         if ($files_to_process.Count -gt 1) {
             $input_file_base_for_report_name = [System.IO.Path]::GetFileNameWithoutExtension($current_input_file)
@@ -299,26 +336,48 @@ foreach ($current_file_info in $files_to_process) {
             $full_report_file_name_current_file = Join-Path $report_location "${report_file_base_original}_${input_file_base_for_report_name}${report_file_ext_original}"
             Write-Warning "Multiple files are processed with 'report_file_name' specified. Modifying report name for '${current_input_file}' to '${full_report_file_name_current_file}'."
         } else {
-            # Single file processed (either by pattern or direct name), use the provided $report_file_name
             $full_report_file_name_current_file = Join-Path $report_location $report_file_name
         }
     }
 
     # Download the report
-    Invoke-RestMethod -Uri "$server_url$download_assessment_url/$AssessmentID/$report_format" -Method Get `
-        -Authentication Bearer -Token $access_token `
-        -StatusCodeVariable http_status_download `
-        -OutFile $full_report_file_name_current_file
-
-    Write-Debug "Download report status for $current_input_file : $http_status_download"
-
-    if ($http_status_download -ge 200 -and $http_status_download -lt 300) {
-        Write-Output "Report for '${current_input_file}' saved to: $full_report_file_name_current_file"
-        $all_report_files.Add($full_report_file_name_current_file)
-    } else {
-        Write-Error "Failed to download report for '${current_input_file}'. HTTP Status: $http_status_download. Report URL might have been: $server_url$download_assessment_url/$AssessmentID/$report_format"
-        $global_exit_code = 1
-        # Continue to next file, this one failed at report download
+    if ($report_format -eq "json" -or $report_format -eq "sarif") {
+        Invoke-RestMethod -Uri "$server_url$download_assessment_url/$AssessmentID/$report_format" -Method Get `
+            -Authentication Bearer -Token $access_token `
+            -StatusCodeVariable http_status_download `
+            -OutFile $full_report_file_name_current_file
+        Write-Debug "Download report status for $current_input_file : $http_status_download"
+        if ($http_status_download -ge 200 -and $http_status_download -lt 300) {
+            Write-Output "Report for '${current_input_file}' saved to: $full_report_file_name_current_file"
+            $all_report_files.Add($full_report_file_name_current_file)
+        } else {
+            Write-Error "Failed to download report for '${current_input_file}'. HTTP Status: $http_status_download. Report URL might have been: $server_url$download_assessment_url/$AssessmentID/$report_format"
+            $global_exit_code = 1
+            continue
+        }
+    } elseif ($report_format -eq "pdf") {
+        # Step 1: Get the report URL from the API
+        $pdf_response = Invoke-RestMethod -Uri "$server_url$download_assessment_url/$AssessmentID/report" -Method Get `
+            -Authentication Bearer -Token $access_token `
+            -StatusCodeVariable http_status_download
+        Write-Debug "PDF report API response for ${current_input_file}: ${pdf_response}"
+        $report_url = $pdf_response.cdn_link
+        if (-not $report_url) {
+            Write-Error "Failed to extract report URL from response for '${current_input_file}'."
+            $global_exit_code = 1
+            continue
+        }
+        # Step 2: Download the PDF from the URL
+        try {
+            Invoke-WebRequest -Uri $report_url -OutFile $full_report_file_name_current_file -UseBasicParsing
+            Write-Debug "Downloaded PDF report to $full_report_file_name_current_file"
+            Write-Output "Report for '${current_input_file}' saved to: $full_report_file_name_current_file"
+            $all_report_files.Add($full_report_file_name_current_file)
+        } catch {
+            Write-Error "Failed to download PDF report from $report_url for '${current_input_file}'"
+            $global_exit_code = 1
+            continue
+        }
     }
     
 } # End foreach ($current_file_info in $files_to_process)
